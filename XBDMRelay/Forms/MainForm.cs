@@ -52,8 +52,8 @@ namespace XBDMRelay.Forms
 
                     AppendLog("Starting UDP and TCP listeners...");
 
-                    var udpTask = Task.Run(() => StartUdpDiscovery(token), token);
-                    var tcpTask = Task.Run(() => StartTcpProxy(token), token);
+                    var udpTask = StartUdpDiscoveryAsync(token);
+                    var tcpTask = StartTcpProxyAsync(token);
 
                     await Task.WhenAll(udpTask, tcpTask);
                 }
@@ -93,35 +93,32 @@ namespace XBDMRelay.Forms
             AppendLog("Proxy stopped.");
         }
 
-        private void StartUdpDiscovery(CancellationToken token)
+        private async Task StartUdpDiscoveryAsync(CancellationToken token)
         {
             using (udpListener = new UdpClient(XboxPort))
             {
-                IPEndPoint remoteEP = new IPEndPoint(IPAddress.Any, 0);
                 AppendLog($"UDP Discovery listener started on port {XboxPort}...");
 
                 try
                 {
                     while (!token.IsCancellationRequested)
                     {
-                        if (udpListener.Available > 0)
-                        {
-                            byte[] data = udpListener.Receive(ref remoteEP);
-                            AppendLog($"UDP Broadcast received from {remoteEP.Address}");
+                        UdpReceiveResult result = await udpListener.ReceiveAsync(token);
+                        IPEndPoint remoteEP = result.RemoteEndPoint;
 
-                            string response = $"MachineName=ProxyXbox;ConsoleType=DEVKIT;IP={LocalIP};Port={XboxPort};SerialNumber=PX123456;XDKVersion=2.0";
-                            byte[] respBytes = Encoding.ASCII.GetBytes(response);
+                        AppendLog($"UDP Broadcast received from {remoteEP.Address}");
 
-                            udpListener.Send(respBytes, respBytes.Length, remoteEP);
-                            AppendLog($"Sent discovery response to {remoteEP.Address}");
-                        }
-                        else
-                        {
-                            Thread.Sleep(50); // Yes I know it's bad practice 
-                        }
+                        string response = $"MachineName=ProxyXbox;ConsoleType=DEVKIT;IP={LocalIP};Port={XboxPort};SerialNumber=PX123456;XDKVersion=2.0";
+                        byte[] respBytes = Encoding.ASCII.GetBytes(response);
+
+                        await udpListener.SendAsync(respBytes, respBytes.Length, remoteEP);
+                        AppendLog($"Sent discovery response to {remoteEP.Address}");
                     }
                 }
-                catch (ObjectDisposedException) { } 
+                catch (OperationCanceledException)
+                {
+                    // normal shutdown
+                }
                 catch (Exception ex)
                 {
                     AppendLog("UDP error: " + ex.Message);
@@ -129,10 +126,12 @@ namespace XBDMRelay.Forms
             }
         }
 
-        private void StartTcpProxy(CancellationToken token)
+
+        private async Task StartTcpProxyAsync(CancellationToken token)
         {
             tcpListener = new TcpListener(IPAddress.Any, XboxPort);
             tcpListener.Start();
+
             StatusLabelCurrentStatus.Text = $"Proxy listening on {LocalIP}:{XboxPort}...";
             AppendLog($"TCP Proxy listening on {LocalIP}:{XboxPort}...");
 
@@ -140,23 +139,20 @@ namespace XBDMRelay.Forms
             {
                 while (!token.IsCancellationRequested)
                 {
-                    if (tcpListener.Pending())
-                    {
-                        TcpClient client = tcpListener.AcceptTcpClient();
-                        Task.Run(() => HandleClientAsync(client, token), token);
-                    }
-                    else
-                    {
-                        Thread.Sleep(50);
-                    }
+                    TcpClient client = await tcpListener.AcceptTcpClientAsync(token);
+                    _ = Task.Run(() => HandleClientAsync(client, token), token);
                 }
             }
-            catch (SocketException) { } // occurs on Stop
+            catch (OperationCanceledException)
+            {
+                
+            }
             catch (Exception ex)
             {
                 AppendLog("TCP error: " + ex.Message);
             }
         }
+
 
         private async Task HandleClientAsync(TcpClient client, CancellationToken token)
         {
